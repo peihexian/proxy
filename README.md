@@ -130,6 +130,33 @@ docker build . -t proxy:v1
 | scramble | 数据是否启用噪声加扰(即通过随机噪声数据混淆数据传输)，此选项需要在2端同时开启 |
 | noise_length | 在启用 `scramble` 的时候，随机发送的噪声数据最大长度，默认最大长度为4k |
 
+## Routing Rules
+
+The server now supports configurable routing rules similar to those found in Clash. You can define rules based on:
+
+*   **CIDR:** Apply actions to specific IP ranges.
+*   **Domain:** Apply actions to specific domain names, domain suffixes (e.g., `.example.com`), or wildcard domains (e.g., `*.example.com`).
+*   **Country:** Apply actions based on the destination IP's geographical location (using the IPIP database).
+
+Supported actions for matched rules are:
+
+*   `direct`: Connect directly to the target.
+*   `proxy`: Route the connection through a specified upstream proxy.
+*   `block`: Deny the connection.
+
+Rules are processed in the order they are defined, and the first matching rule is applied.
+
+**Configuration:**
+
+Rules are defined in the configuration file using the `routing_rules` option. Each rule is a string with the format: `type:value:action[:proxy_url]`
+
+For example:
+`routing_rules = cidr:192.168.1.0/24:direct`
+`routing_rules = domain:.google.com:proxy:socks5://myproxy.example.com:1080`
+`routing_rules = country:CN:block`
+
+See the `doc/server.conf.example` file for more detailed examples and usage.
+
 ## 静态文件 http 服务器
 
 `proxy server` 不仅是一个 `proxy` 服务器，同时还可以做为一个真实的静态文件 `http` 服务，且支持 `http range`，所以也可以作为 `http` 视频文件服务器，播放器播放 `http` 视频文件时通过 `http` 的 `bytes range` 协议进行 `seek`（快进快退），使用方法如下

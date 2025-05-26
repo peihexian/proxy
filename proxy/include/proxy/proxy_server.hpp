@@ -96,6 +96,7 @@
 #include "proxy/fileop.hpp"
 #include "proxy/strutil.hpp"
 #include "proxy/ipip.hpp"
+#include "proxy/routing_rules.hpp"
 
 #include "proxy/socks_enums.hpp"
 #include "proxy/socks_client.hpp"
@@ -401,6 +402,10 @@ R"x*x*x(<html>
 		// ipip 数据库文件可以从: https://www.ipip.net 下载.
 		std::string ipip_db_;
 
+		// Routing rules for advanced proxy logic.
+		// Rules are evaluated in order to determine action for a connection.
+		std::vector<std::shared_ptr<RoutingRule>> routing_rules_;
+
 		// 多层代理, 当前服务器级连下一个服务器, 对于 client 而言是无感的,
 		// 这是当前服务器通过 proxy_pass_ 指定的下一个代理服务器, 为 client
 		// 实现多层代理.
@@ -551,6 +556,7 @@ R"x*x*x(<html>
 		virtual size_t num_session() = 0;
 		virtual const proxy_server_option& option() = 0;
 		virtual net::ssl::context& ssl_context() = 0;
+		virtual const ipip_datx* get_ipip_db() const = 0;
 	};
 
 
@@ -862,14 +868,67 @@ R"x*x*x(<html>
 
 			boost::system::error_code ec;
 
-			bool ret = co_await connect_bridge_proxy(
-				remote_socket,
+			// Evaluate routing rules for transparent proxy
+			auto rule_decision_tproxy = evaluate_routing_rules(m_tproxy_remote.address().to_string(), m_tproxy_remote.port());
+			if (rule_decision_tproxy) {
+				const auto& [action, proxy_url_str] = *rule_decision_tproxy;
+				if (action == RuleAction::BLOCK) {
+					XLOG_WARN << "connection id: " << m_connection_id
+								<< ", Transparent request to " << m_tproxy_remote
+								<< " blocked by rule.";
+					close(); 
+					co_return;
+				} else if (action == RuleAction::PROXY) {
+					XLOG_DBG << "connection id: " << m_connection_id
+								<< ", Transparent request to " << m_tproxy_remote
+								<< " routed to PROXY '" << proxy_url_str << "' by rule.";
+					try {
+						m_bridge_proxy = std::make_unique<urls::url_view>(proxy_url_str);
+					} catch (const std::exception& e) {
+						XLOG_ERR << "connection id: " << m_connection_id
+									<< ", Error parsing proxy URL from rule: '" << proxy_url_str
+									<< "', exception: " << e.what();
+						close(); // Close connection on bad proxy config
+						co_return;
+					}
+				} else if (action == RuleAction::DIRECT) {
+					XLOG_DBG << "connection id: " << m_connection_id
+								<< ", Transparent request to " << m_tproxy_remote
+								<< " routed DIRECT by rule.";
+					m_bridge_proxy.reset(); 
+				}
+			} else {
+				// Default behavior: use global proxy_pass_ or direct
+				if (!m_option.proxy_pass_.empty() && !m_bridge_proxy) {
+					try {
+						m_bridge_proxy = std::make_unique<urls::url_view>(m_option.proxy_pass_);
+					} catch (const std::exception& e) {
+						XLOG_ERR << "connection id: " << m_connection_id
+									<< ", Error parsing global proxy_pass: '" << m_option.proxy_pass_
+									<< "', exception: " << e.what();
+						close(); // Close connection on bad global proxy config
+						co_return;
+					}
+				} else if (m_option.proxy_pass_.empty() && !rule_decision_tproxy.has_value()){
+                    m_bridge_proxy.reset(); // Ensure direct if no global and no rule
+                }
+			}
+
+			// The logic below will use start_connect_host, which respects m_bridge_proxy
+			bool success = co_await start_connect_host(
 				m_tproxy_remote.address().to_string(),
 				m_tproxy_remote.port(),
-				ec);
+				ec,
+				false // destination is already an IP, no resolve needed for direct case
+			);
 
-			if (!ret)
+			if (!success || ec) { // Check success flag from start_connect_host and ec
+				XLOG_WARN << "connection id: " << m_connection_id 
+				          << ", Transparent proxy connection failed to " << m_tproxy_remote 
+						  << ", error: " << ec.message();
+				close(); // Close the session if connection failed
 				co_return;
+			}
 
 			size_t l2r_transferred = 0;
 			size_t r2l_transferred = 0;
@@ -1610,11 +1669,91 @@ R"x*x*x(<html>
 					<< dst_endpoint;
 			}
 
+			// Evaluate routing rules
+			std::optional<std::pair<RuleAction, std::string>> rule_decision_socks5;
+			std::string effective_host_socks5 = (atyp == SOCKS5_ATYP_DOMAINNAME) ? domain : dst_endpoint.address().to_string();
+
+			rule_decision_socks5 = evaluate_routing_rules(effective_host_socks5, port);
+
+			if (rule_decision_socks5) {
+				const auto& [action, proxy_url_str] = *rule_decision_socks5;
+				if (action == RuleAction::BLOCK) {
+					XLOG_WARN << "connection id: " << m_connection_id
+								<< ", SOCKS5 request to " << effective_host_socks5 << ":" << port
+								<< " blocked by rule.";
+					// Send SOCKS5 reply indicating failure (connection not allowed by ruleset)
+					wbuf.consume(wbuf.size()); // Clear previous buffer content
+					auto wp_block = (char*)wbuf.prepare(64 + domain.size()).data(); // Ensure enough space
+					write<uint8_t>(SOCKS_VERSION_5, wp_block);
+					write<uint8_t>(SOCKS5_CONNECTION_NOT_ALLOWED_BY_RULESET, wp_block); 
+					write<uint8_t>(0x00, wp_block); // RSV
+					// Write original ATYP, ADDR, PORT as BND.ADDR, BND.PORT
+					if (atyp == SOCKS5_ATYP_IPV4) {
+						write<uint8_t>(SOCKS5_ATYP_IPV4, wp_block);
+						write<uint32_t>(dst_endpoint.address().to_v4().to_uint(), wp_block);
+						write<uint16_t>(port, wp_block);
+					} else if (atyp == SOCKS5_ATYP_DOMAINNAME) {
+						write<uint8_t>(SOCKS5_ATYP_DOMAINNAME, wp_block);
+						write<uint8_t>(static_cast<uint8_t>(domain.size()), wp_block);
+						std::copy(domain.begin(), domain.end(), wp_block);
+						wp_block += domain.size();
+						write<uint16_t>(port, wp_block);
+					} else { // SOCKS5_ATYP_IPV6
+						write<uint8_t>(SOCKS5_ATYP_IPV6, wp_block);
+						auto v6_bytes = dst_endpoint.address().to_v6().to_bytes();
+						std::copy(v6_bytes.begin(), v6_bytes.end(), wp_block);
+						wp_block += v6_bytes.size();
+						write<uint16_t>(port, wp_block);
+					}
+					auto len_block = wp_block - (const char*)wbuf.data().data();
+					wbuf.commit(len_block);
+					co_await net::async_write(m_local_socket, wbuf, net::transfer_exactly(len_block), net_awaitable[ec]);
+					co_return;
+				} else if (action == RuleAction::PROXY) {
+					XLOG_DBG << "connection id: " << m_connection_id
+								<< ", SOCKS5 request to " << effective_host_socks5 << ":" << port
+								<< " routed to PROXY " << proxy_url_str << " by rule.";
+					try {
+						m_bridge_proxy = std::make_unique<urls::url_view>(proxy_url_str);
+					} catch (const std::exception& e) {
+						XLOG_ERR << "connection id: " << m_connection_id
+									<< ", Error parsing proxy URL from rule: '" << proxy_url_str
+									<< "', exception: " << e.what();
+						ec = net::error::address_not_available; // Indicate configuration error
+						// Error reply will be sent by the generic error handling block later
+					}
+				} else if (action == RuleAction::DIRECT) {
+					XLOG_DBG << "connection id: " << m_connection_id
+								<< ", SOCKS5 request to " << effective_host_socks5 << ":" << port
+								<< " routed DIRECT by rule.";
+					m_bridge_proxy.reset(); // Ensure no prior bridge proxy is used
+				}
+			} else {
+				// No rule matched, apply default behavior (use global m_option.proxy_pass_ or direct)
+				if (!m_option.proxy_pass_.empty() && !m_bridge_proxy) { 
+					try {
+						m_bridge_proxy = std::make_unique<urls::url_view>(m_option.proxy_pass_);
+					} catch (const std::exception& e) {
+						XLOG_ERR << "connection id: " << m_connection_id
+									<< ", Error parsing global proxy_pass: '" << m_option.proxy_pass_
+									<< "', exception: " << e.what();
+						ec = net::error::address_not_available;
+                        // Error reply will be sent by the generic error handling block later
+					}
+				} else if (m_option.proxy_pass_.empty() && !rule_decision_socks5.has_value()) { // ensure direct only if no rule and no global proxy
+					m_bridge_proxy.reset(); 
+                }
+			}
+
+
 			if (command == SOCKS_CMD_CONNECT)
 			{
-				// 连接目标主机.
+				// If 'ec' was set by proxy parsing, it will be handled by the error block after start_connect_host
 				co_await start_connect_host(
-					domain, port, ec, atyp == SOCKS5_ATYP_DOMAINNAME);
+					effective_host_socks5, // Use the determined effective host
+					port,
+					ec, // Pass 'ec' to be populated by start_connect_host
+					atyp == SOCKS5_ATYP_DOMAINNAME);
 			}
 			else if (command == SOCKS5_CMD_UDP)
 			do {
@@ -2147,6 +2286,81 @@ R"x*x*x(<html>
 					<< m_connection_id
 					<< ", auth no pass";
 
+			// Before attempting to connect, evaluate routing rules.
+			std::string effective_host = socks4a ? hostname : dst_endpoint.address().to_string();
+			auto rule_decision = evaluate_routing_rules(effective_host, port);
+
+			if (rule_decision) {
+				const auto& [action, proxy_url_str] = *rule_decision;
+				if (action == RuleAction::BLOCK) {
+					XLOG_WARN << "connection id: " << m_connection_id
+								<< ", SOCKS4 request to " << effective_host << ":" << port
+								<< " blocked by rule.";
+					// Send SOCKS4 error for block
+					net::streambuf wbuf_block;
+					auto wp_block = (char*)wbuf_block.prepare(16).data();
+					write<uint8_t>(0, wp_block);
+					write<uint8_t>(SOCKS4_REQUEST_REJECTED_OR_FAILED, wp_block); // General failure for block
+					write<uint16_t>(port, wp_block); // Original port
+					write<uint32_t>(dst_endpoint.address().to_v4().to_uint(), wp_block); // Original IP (or 0.0.0.x for domain)
+					wbuf_block.commit(8);
+					co_await net::async_write(m_local_socket, wbuf_block, net::transfer_exactly(8), net_awaitable[ec]);
+					co_return;
+				} else if (action == RuleAction::PROXY) {
+					XLOG_DBG << "connection id: " << m_connection_id
+								<< ", SOCKS4 request to " << effective_host << ":" << port
+								<< " routed to PROXY " << proxy_url_str << " by rule.";
+					try {
+						m_bridge_proxy = std::make_unique<urls::url_view>(proxy_url_str);
+					} catch (const std::exception& e) {
+						XLOG_ERR << "connection id: " << m_connection_id
+									<< ", Error parsing proxy URL from rule: " << proxy_url_str
+									<< ", exception: " << e.what();
+						// Error reply for bad proxy config from rule
+						error_code = SOCKS4_REQUEST_REJECTED_OR_FAILED; // General failure
+										net::streambuf wbuf_err;
+						auto wp_err = (char*)wbuf_err.prepare(16).data();
+						write<uint8_t>(0, wp_err);
+						write<uint8_t>((uint8_t)error_code, wp_err);
+						write<uint16_t>(port, wp_err);
+						write<uint32_t>(dst_endpoint.address().to_v4().to_uint(), wp_err);
+						wbuf_err.commit(8);
+						co_await net::async_write(m_local_socket, wbuf_err, net::transfer_exactly(8), net_awaitable[ec]);
+						co_return;
+					}
+				} else if (action == RuleAction::DIRECT) {
+					XLOG_DBG << "connection id: " << m_connection_id
+								<< ", SOCKS4 request to " << effective_host << ":" << port
+								<< " routed DIRECT by rule.";
+					m_bridge_proxy.reset();
+				}
+			} else {
+				// No rule matched, apply default behavior
+				if (!m_option.proxy_pass_.empty() && !m_bridge_proxy) {
+					try {
+						m_bridge_proxy = std::make_unique<urls::url_view>(m_option.proxy_pass_);
+					} catch (const std::exception& e) {
+						XLOG_ERR << "connection id: " << m_connection_id
+									<< ", Error parsing global proxy_pass: " << m_option.proxy_pass_
+									<< ", exception: " << e.what();
+						error_code = SOCKS4_REQUEST_REJECTED_OR_FAILED;
+						// Send error reply (similar to above) and co_return
+                        net::streambuf wbuf_gerr;
+                        auto wp_gerr = (char*)wbuf_gerr.prepare(16).data();
+                        write<uint8_t>(0, wp_gerr);
+                        write<uint8_t>((uint8_t)error_code, wp_gerr);
+                        write<uint16_t>(port, wp_gerr);
+                        write<uint32_t>(dst_endpoint.address().to_v4().to_uint(), wp_gerr);
+                        wbuf_gerr.commit(8);
+                        co_await net::async_write(m_local_socket, wbuf_gerr, net::transfer_exactly(8), net_awaitable[ec]);
+                        co_return;
+					}
+				} else if (m_option.proxy_pass_.empty()) {
+                    m_bridge_proxy.reset();
+                }
+			}
+
+
 			if (!verify_passed)
 			{
 				//  +----+----+----+----+----+----+----+----+
@@ -2496,19 +2710,70 @@ R"x*x*x(<html>
 
 				if (!m_remote_socket.is_open())
 				{
+					// Evaluate routing rules for HTTP GET proxy
+					uint16_t effective_port_http_get = port ? port : (scheme_id == urls::scheme::https ? 443 : 80);
+					auto rule_decision_http_get = evaluate_routing_rules(host, effective_port_http_get);
+
+					if (rule_decision_http_get) {
+						const auto& [action, proxy_url_str] = *rule_decision_http_get;
+						if (action == RuleAction::BLOCK) {
+							XLOG_WARN << "connection id: " << m_connection_id
+										<< ", HTTP GET request to " << host << ":" << effective_port_http_get
+										<< " blocked by rule.";
+							co_await default_http_route(req, fake_403_content, http::status::forbidden);
+							co_return true; 
+						} else if (action == RuleAction::PROXY) {
+							XLOG_DBG << "connection id: " << m_connection_id
+										<< ", HTTP GET request to " << host << ":" << effective_port_http_get
+										<< " routed to PROXY " << proxy_url_str << " by rule.";
+							try {
+								m_bridge_proxy = std::make_unique<urls::url_view>(proxy_url_str);
+							} catch (const std::exception& e) {
+								XLOG_ERR << "connection id: " << m_connection_id
+											<< ", Error parsing proxy URL from rule: '" << proxy_url_str
+											<< "', exception: " << e.what();
+								co_await default_http_route(req, fake_400_content, http::status::bad_request); 
+								co_return true;
+							}
+						} else if (action == RuleAction::DIRECT) {
+							XLOG_DBG << "connection id: " << m_connection_id
+										<< ", HTTP GET request to " << host << ":" << effective_port_http_get
+										<< " routed DIRECT by rule.";
+							m_bridge_proxy.reset();
+						}
+					} else {
+						// Default behavior for HTTP GET proxy
+						if (!m_option.proxy_pass_.empty() && !m_bridge_proxy) {
+							try {
+								m_bridge_proxy = std::make_unique<urls::url_view>(m_option.proxy_pass_);
+							} catch (const std::exception& e) {
+								XLOG_ERR << "connection id: " << m_connection_id
+											<< ", Error parsing global proxy_pass for HTTP GET: '" << m_option.proxy_pass_
+											<< "', exception: " << e.what();
+								co_await default_http_route(req, fake_400_content, http::status::bad_request);
+								co_return true;
+							}
+						} else if (m_option.proxy_pass_.empty() && !rule_decision_http_get.has_value()) {
+							m_bridge_proxy.reset();
+						}
+					}
+
 					// 连接到目标主机.
-					co_await start_connect_host(host,
-						port ? port : 80, ec, true);
+					co_await start_connect_host(host, effective_port_http_get, ec, true);
 					if (ec)
 					{
 						XLOG_FWARN("connection id: {},"
 							" connect to target {}:{} error: {}",
 							m_connection_id,
 							host,
-							port,
+							effective_port_http_get, // use the determined port
 							ec.message());
-
-						co_return !first;
+						// For HTTP GET proxy, an error response might need to be sent to the client here,
+						// or rely on the overall function's error handling.
+						// Based on original logic, it returns !first, which might lead to a generic error.
+						// Consider sending a specific HTTP error if ec is set.
+						// For now, keeping original behavior of returning !first.
+						co_return !first; 
 					}
 				}
 
@@ -2642,19 +2907,69 @@ R"x*x*x(<html>
 			}
 
 			std::string host(target_view.substr(0, pos));
-			std::string port(target_view.substr(pos + 1));
+			std::string port_str(target_view.substr(pos + 1));
+			uint16_t num_port = static_cast<uint16_t>(std::atol(port_str.c_str()));
 
-			co_await start_connect_host(host,
-				static_cast<uint16_t>(std::atol(port.c_str())), ec, true);
+			// Evaluate routing rules for HTTP CONNECT
+			auto rule_decision_http_connect = evaluate_routing_rules(host, num_port);
+			if (rule_decision_http_connect) {
+				const auto& [action, proxy_url_str] = *rule_decision_http_connect;
+				if (action == RuleAction::BLOCK) {
+					XLOG_WARN << "connection id: " << m_connection_id
+								<< ", HTTP CONNECT request to " << host << ":" << num_port
+								<< " blocked by rule.";
+					co_await default_http_route(req, fake_403_content, http::status::forbidden);
+					co_return true; // Return true as CONNECT error response sent, function expects bool
+				} else if (action == RuleAction::PROXY) {
+					XLOG_DBG << "connection id: " << m_connection_id
+								<< ", HTTP CONNECT request to " << host << ":" << num_port
+								<< " routed to PROXY " << proxy_url_str << " by rule.";
+					try {
+						m_bridge_proxy = std::make_unique<urls::url_view>(proxy_url_str);
+					} catch (const std::exception& e) {
+						XLOG_ERR << "connection id: " << m_connection_id
+									<< ", Error parsing proxy URL from rule: '" << proxy_url_str
+									<< "', exception: " << e.what();
+						co_await default_http_route(req, fake_400_content, http::status::bad_request);
+						co_return true; // Return true as CONNECT error response sent
+					}
+				} else if (action == RuleAction::DIRECT) {
+					XLOG_DBG << "connection id: " << m_connection_id
+								<< ", HTTP CONNECT request to " << host << ":" << num_port
+								<< " routed DIRECT by rule.";
+					m_bridge_proxy.reset();
+				}
+			} else {
+				// Default behavior for HTTP CONNECT
+				if (!m_option.proxy_pass_.empty() && !m_bridge_proxy) {
+					try {
+						m_bridge_proxy = std::make_unique<urls::url_view>(m_option.proxy_pass_);
+					} catch (const std::exception& e) {
+						XLOG_ERR << "connection id: " << m_connection_id
+									<< ", Error parsing global proxy_pass for HTTP CONNECT: '" << m_option.proxy_pass_
+									<< "', exception: " << e.what();
+						co_await default_http_route(req, fake_400_content, http::status::bad_request);
+						co_return true; // Return true as CONNECT error response sent
+					}
+				} else if (m_option.proxy_pass_.empty() && !rule_decision_http_connect.has_value()) {
+					m_bridge_proxy.reset();
+				}
+			}
+
+			co_await start_connect_host(host, num_port, ec, true);
 			if (ec)
 			{
 				XLOG_FWARN("connection id: {},"
 					" connect to target {}:{} error: {}",
 					m_connection_id,
 					host,
-					port,
+					port_str, // Use original port_str for logging consistency
 					ec.message());
-				co_return false;
+				// If start_connect_host fails, an HTTP error response should be sent.
+				// The original code returns false, implying the caller might handle it.
+				// For consistency with BLOCK/PROXY rule errors, sending an error here is better.
+				co_await default_http_route(req, fake_403_content, http::status::forbidden); 
+				co_return false; // Original return is bool
 			}
 
 			http::response<http::empty_body> res{
@@ -3315,28 +3630,64 @@ R"x*x*x(<html>
 			co_return true;
 		}
 
+		// This is the primary method for establishing an outbound connection,
+		// either direct or through a pre-configured m_bridge_proxy.
 		inline net::awaitable<bool> start_connect_host(
-			std::string target_host,
-			uint16_t target_port,
+			std::string target_host, // This is the ultimate destination host/IP
+			uint16_t target_port,   // This is the ultimate destination port
 			boost::system::error_code& ec,
-			bool resolve = false)
+			bool resolve = false)   // Whether target_host needs DNS resolution for direct connection
 		{
 			auto executor = co_await net::this_coro::executor;
 
-			tcp::socket& remote_socket =
-				net_tcp_socket(m_remote_socket);
-
-			if (m_bridge_proxy)
+			if (m_bridge_proxy) 
 			{
-				auto ret = co_await connect_bridge_proxy(
-					remote_socket,
-					target_host,
-					target_port,
-					ec);
+				// If m_bridge_proxy is set (by a rule or global config), we connect to this proxy first.
+				// The `target_host` and `target_port` are then used for the subsequent handshake
+				// with this bridge proxy (e.g., SOCKS CONNECT command or HTTP CONNECT target).
 
-				co_return ret;
+				// connect_bridge_proxy needs a plain tcp::socket to make the initial connection to the bridge.
+				// This socket might then be wrapped (e.g., SSL) and the resulting stream assigned to m_remote_socket.
+				tcp::socket plain_tcp_socket(executor); 
+
+				// Configure the plain_tcp_socket (SO_MARK, bind_interface) before connecting to the bridge.
+#if defined (__linux__)
+				// SO_MARK is typically relevant for transparent proxy scenarios, ensure it's applied if needed.
+				// If m_tproxy is true, it means the original connection was transparent.
+				// If rules then dictate a proxy, this outbound connection to the proxy might still need SO_MARK.
+				if (m_option.so_mark_ && m_tproxy) 
+				{
+					auto sockfd = plain_tcp_socket.native_handle(); // Corrected: use plain_tcp_socket's handle
+					uint32_t mark = m_option.so_mark_.value();
+					if (::setsockopt(sockfd, SOL_SOCKET, SO_MARK, &mark, sizeof(uint32_t)) < 0)
+						XLOG_FWARN("connection id: {}, setsockopt for bridge connection SO_MARK: {}", m_connection_id, strerror(errno));
+				}
+#endif
+				if (m_bind_interface) { // Apply bind_interface if specified
+					boost::system::error_code bind_ec;
+					plain_tcp_socket.open(m_bind_interface->is_v4() ? tcp::v4() : tcp::v6(), bind_ec);
+					if (!bind_ec) {
+						plain_tcp_socket.set_option(net::socket_base::reuse_address(true), bind_ec); // Good practice
+						plain_tcp_socket.bind(tcp::endpoint(*m_bind_interface, 0), bind_ec);
+					}
+					if (bind_ec) {
+						XLOG_WARN << "connection id: " << m_connection_id << ", Failed to bind outgoing socket for bridge to " << m_bind_interface->to_string() << ": " << bind_ec.message();
+						ec = bind_ec; // Populate the main error code
+						co_return false;
+					}
+				}
+
+				// Now, connect to the bridge proxy and perform necessary handshakes.
+				// m_remote_socket will be updated by connect_bridge_proxy.
+				bool success = co_await connect_bridge_proxy(
+					plain_tcp_socket, // Pass the prepared plain socket
+					target_host,      // Ultimate destination host
+					target_port,      // Ultimate destination port
+					ec);
+				
+				co_return success;
 			}
-			else
+			else // Direct connection to the target_host
 			{
 				net::ip::basic_resolver_results<tcp> targets;
 				if (resolve)
@@ -4614,6 +4965,36 @@ R"x*x*x(<html>
 
 		// 当前 session 是否被中止的状态.
 		bool m_abort{ false };
+
+	private:
+		std::optional<std::pair<RuleAction, std::string>> evaluate_routing_rules(const std::string& destination_host, uint16_t destination_port)
+		{
+			auto server = m_proxy_server.lock();
+			if (!server) {
+				return std::nullopt; // Should not happen if session is alive
+			}
+
+			const auto* ipip_db = server->get_ipip_db();
+			const auto& rules = m_option.routing_rules_;
+
+			if (rules.empty()) {
+				return std::nullopt;
+			}
+
+			// XLOG_DBG << "Connection id: " << m_connection_id << ", Evaluating routing rules for " << destination_host << ":" << destination_port;
+
+			for (const auto& rule : rules) {
+				if (rule->matches(destination_host, destination_port, ipip_db)) {
+					// XLOG_DBG << "Connection id: " << m_connection_id << ", Matched rule. Action: " << static_cast<int>(rule->action_);
+					if (rule->action_ == RuleAction::PROXY) {
+						return std::make_pair(rule->action_, rule->get_proxy_url());
+					}
+					return std::make_pair(rule->action_, "");
+				}
+			}
+			// XLOG_DBG << "Connection id: " << m_connection_id << ", No routing rule matched.";
+			return std::nullopt;
+		}
 	};
 
 
@@ -5206,6 +5587,11 @@ R"x*x*x(<html>
 		net::ssl::context& ssl_context() override
 		{
 			return m_ssl_srv_context;
+		}
+
+		const ipip_datx* get_ipip_db() const override
+		{
+			return m_ipip.get();
 		}
 
 	private:

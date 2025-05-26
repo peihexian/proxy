@@ -1,4 +1,4 @@
-﻿//
+//
 // main.cpp
 // ~~~~~~~~
 //
@@ -17,6 +17,7 @@
 #include <boost/asio/signal_set.hpp>
 
 #include <boost/algorithm/string/join.hpp>
+#include <boost/algorithm/string/case_conv.hpp> // For to_upper
 #include <boost/program_options.hpp>
 namespace po = boost::program_options;
 
@@ -26,6 +27,8 @@ namespace po = boost::program_options;
 
 #include "proxy/use_awaitable.hpp"
 #include "proxy/ipip.hpp"
+#include "proxy/routing_rules.hpp" // Added for routing rules
+#include "proxy/strutil.hpp"      // For strutil::split
 
 #ifdef _MSC_VER
 # pragma warning(push)
@@ -63,6 +66,7 @@ std::vector<std::string> auth_users;
 std::vector<std::string> users_rate_limit;
 std::vector<std::string> deny_region;
 std::vector<std::string> allow_region;
+std::vector<std::string> routing_rules_strings; // Added for routing rules
 
 std::string ipip_db;
 std::string doc_dir;
@@ -212,6 +216,87 @@ start_proxy_server(net::io_context& ioc, server_ptr& server)
 	opt.autoindex_ = autoindex;
 	opt.htpasswd_ = htpasswd;
 
+	// Parse routing rules strings
+	for (const auto& rule_str : routing_rules_strings) {
+		XLOG_DBG << "Parsing rule string: " << rule_str;
+		auto parts = strutil::split(rule_str, ":");
+
+		if (parts.size() < 3) {
+			XLOG_ERR << "Invalid rule string format (too few parts): '" << rule_str << "'. Expected type:value:action[:proxy_url]";
+			std::cerr << "Invalid rule string format (too few parts): '" << rule_str << "'. Expected type:value:action[:proxy_url]" << std::endl;
+			continue;
+		}
+
+		std::string type_str = std::string(parts[0]);
+		std::string value_str = std::string(parts[1]);
+		std::string action_str = std::string(parts[2]);
+		std::string proxy_url_val; 
+
+		RuleAction action_enum_val;
+		if (boost::iequals(action_str, "direct")) {
+			action_enum_val = RuleAction::DIRECT;
+		} else if (boost::iequals(action_str, "proxy")) {
+			action_enum_val = RuleAction::PROXY;
+			if (parts.size() < 4) {
+				XLOG_ERR << "Invalid rule string format for PROXY action (missing proxy_url): '" << rule_str << "'";
+				std::cerr << "Invalid rule string format for PROXY action (missing proxy_url): '" << rule_str << "'" << std::endl;
+				continue;
+			}
+			// Reconstruct proxy_url because it might contain colons
+			// The proxy_url starts after "type:value:action:"
+			size_t proxy_url_start_pos = parts[0].length() + parts[1].length() + parts[2].length() + 3;
+			if (rule_str.length() > proxy_url_start_pos) {
+				proxy_url_val = rule_str.substr(proxy_url_start_pos);
+			} else {
+				XLOG_ERR << "Proxy URL appears empty or malformed in rule: '" << rule_str << "'";
+				std::cerr << "Proxy URL appears empty or malformed in rule: '" << rule_str << "'" << std::endl;
+				continue;
+			}
+		} else if (boost::iequals(action_str, "block")) {
+			action_enum_val = RuleAction::BLOCK;
+		} else {
+			XLOG_ERR << "Invalid action in rule string: '" << action_str << "' in rule: '" << rule_str << "'";
+			std::cerr << "Invalid action in rule string: '" << action_str << "' in rule: '" << rule_str << "'" << std::endl;
+			continue;
+		}
+		
+		try {
+			if (boost::iequals(type_str, "cidr")) {
+				if (action_enum_val == RuleAction::PROXY) {
+					opt.routing_rules_.push_back(std::make_shared<CIDRRule>(value_str, action_enum_val, proxy_url_val));
+				} else {
+					opt.routing_rules_.push_back(std::make_shared<CIDRRule>(value_str, action_enum_val));
+				}
+				XLOG_INFO << "Added CIDR rule: " << value_str << " -> " << action_str << (action_enum_val == RuleAction::PROXY ? " via " + proxy_url_val : "");
+			} else if (boost::iequals(type_str, "domain")) {
+				if (action_enum_val == RuleAction::PROXY) {
+					opt.routing_rules_.push_back(std::make_shared<DomainRule>(value_str, action_enum_val, proxy_url_val));
+				} else {
+					opt.routing_rules_.push_back(std::make_shared<DomainRule>(value_str, action_enum_val));
+				}
+				XLOG_INFO << "Added Domain rule: " << value_str << " -> " << action_str << (action_enum_val == RuleAction::PROXY ? " via " + proxy_url_val : "");
+			} else if (boost::iequals(type_str, "country")) {
+				std::string country_code_upper = boost::to_upper_copy<std::string>(value_str);
+				if (action_enum_val == RuleAction::PROXY) {
+					opt.routing_rules_.push_back(std::make_shared<CountryRule>(country_code_upper, action_enum_val, proxy_url_val));
+				} else {
+					opt.routing_rules_.push_back(std::make_shared<CountryRule>(country_code_upper, action_enum_val));
+				}
+				XLOG_INFO << "Added Country rule: " << country_code_upper << " -> " << action_str << (action_enum_val == RuleAction::PROXY ? " via " + proxy_url_val : "");
+			} else {
+				XLOG_ERR << "Invalid type in rule string: '" << type_str << "' in rule: '" << rule_str << "'";
+				std::cerr << "Invalid type in rule string: '" << type_str << "' in rule: '" << rule_str << "'" << std::endl;
+				continue;
+			}
+		} catch (const boost::system::system_error& e) { 
+			XLOG_ERR << "Error creating rule for '" << rule_str << "': " << e.what() << " (Code: " << e.code() << "). Likely invalid CIDR format for: '" << value_str << "'";
+			std::cerr << "Error creating rule for '" << rule_str << "': " << e.what() << " (Code: " << e.code() << "). Likely invalid CIDR format for: '" << value_str << "'" << std::endl;
+		} catch (const std::exception& e) { 
+			XLOG_ERR << "Error creating rule for '" << rule_str << "': " << e.what();
+			std::cerr << "Error creating rule for '" << rule_str << "': " << e.what() << std::endl;
+		}
+	}
+
 	server = proxy_server::make(
 		ioc.get_executor(), opt);
 	server->start();
@@ -338,6 +423,8 @@ int main(int argc, char** argv)
 
 		("allow_region", po::value<std::vector<std::string>>(&allow_region)->multitoken(), "Allow region (e.g: 北京|河南|武汉).")
 		("deny_region", po::value<std::vector<std::string>>(&deny_region)->multitoken(), "Deny region (e.g: 广东|上海|山东).")
+		
+		("routing_rules", po::value<std::vector<std::string>>(&routing_rules_strings)->multitoken()->value_name("rules"), "Define routing rules. Each rule is a string (e.g., 'cidr:192.168.1.0/24:direct', 'domain:.google.com:proxy:socks5://user:pass@host:port', 'country:US:block')")
 
 		("proxy_pass", po::value<std::string>(&proxy_pass)->default_value("")->value_name(""), "Specify next proxy pass (e.g: socks5://user:passwd@ip:port).")
 		("proxy_pass_ssl", po::value<bool>(&proxy_pass_ssl)->default_value(false, "false")->value_name(""), "Enable SSL for the next proxy pass.")

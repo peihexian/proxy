@@ -14,6 +14,22 @@ server_listen=0.0.0.0:443
 auth_users=admin:8888
 auth_users=jack:1111
 
+# Routing Rules
+# Define rules to customize routing behavior.
+# Format: type:value:action[:proxy_url]
+# type: cidr, domain, country
+# value: CIDR string, domain pattern (exact, .suffix, *.prefix), 2-letter country code
+# action: direct, proxy, block
+# proxy_url (required for 'proxy' action): e.g., socks5://user:pass@host:port, http://host:port
+
+# routing_rules = cidr:192.168.0.0/16:direct
+# routing_rules = domain:.internal.example.com:direct
+# routing_rules = domain:ads.example.com:block
+# routing_rules = country:CN:direct
+# routing_rules = country:US:proxy:socks5://us-proxy.example.com:1080
+# routing_rules = domain:restricted.com:block
+# routing_rules = cidr:10.1.2.3/32:proxy:http://specific-proxy.example.com:8080
+
 #ssl_certificate_dir=/path/proxy.server.example/
 
 disable_insecure=false
