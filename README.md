@@ -155,6 +155,9 @@ For example:
 `routing_rules = domain:.google.com:proxy:socks5://myproxy.example.com:1080`
 `routing_rules = country:CN:block`
 
+Country-based rules require the `ipip_db` option to be configured so that the
+server can resolve IP addresses to countries using the database.
+
 See the `doc/server.conf.example` file for more detailed examples and usage.
 
 ## 静态文件 http 服务器

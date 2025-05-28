@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
+#include <cctype>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/network_v4.hpp>
 // #include <boost/algorithm/string/predicate.hpp> // For iequals - replaced by strutil
@@ -157,103 +159,67 @@ struct CountryRule : public RoutingRule {
 
     bool matches(const std::string& destination_host, uint16_t /*destination_port*/, const ipip_datx* ipip_db) const override {
         if (!ipip_db) {
-            return false; // Cannot perform lookup without the database
-        }
-
-        // If destination_host is a domain, this rule depends on prior IP resolution.
-        // For now, assume destination_host is an IP. A robust check can be added.
-        boost::system::error_code ec;
-        boost::asio::ip::address ip_addr = boost::asio::ip::make_address(destination_host, ec);
-        if (ec) { // Not a valid IP address string
             return false;
         }
 
-        // Assuming ipip.hpp provides a lookup function like:
-        // std::string lookup(const ipip_datx* db, const boost::asio::ip::address& ip);
-        // For now, this is a placeholder for the actual lookup logic.
-        // The actual ipip_datx struct and its lookup function are defined in proxy/ipip.hpp
-        // We'd need to include "proxy/ipip.hpp" for the actual implementation.
-        // For now, let's imagine a function `ipip_db->lookup_country_code(ip_addr)` exists.
-        
-        // Placeholder: Replace with actual call to ipip_db->lookup
-        // For example, if ipip_db has a method: std::string find(const char* ip, char* result_buffer, size_t buffer_len);
-        // char result[256]; // Max length for country info
-        // if (ipip_db->find(destination_host.c_str(), result, sizeof(result))) {
-        //    std::string country_info = result;
-        //    // Assuming country_info is "Country Name\tProvince Name\tCity Name\tISP"
-        //    // And country code might be derived or directly available.
-        //    // This is highly dependent on the actual ipip_datx API.
-        //    // For this placeholder, let's assume a direct country code lookup.
-        //    std::string looked_up_country = "XX"; // Placeholder
-        //    // This part needs the actual ipip_datx API.
-        //    // For now, we cannot fully implement this.
-        //    // Let's assume a hypothetical direct lookup:
-        //    // looked_up_country = ipip_db->get_country_code_for_ip(ip_addr.to_string());
-        //
-        //    // This is a simplified placeholder. The actual ipip.hpp integration is needed.
-        //    // The ipip_datx struct might have a method like:
-        //    // bool get_country(const std::string& ip_address, std::string& country_code_output) const;
-        //    // For now, let's assume it returns "CN", "US", etc.
-        //    // This part is crucial and needs the actual ipip_datx structure and methods.
-        //    // Since we don't have the ipip.hpp contents, we'll make a simplifying assumption
-        //    // that a function exists that can give us the country code.
-        //    // This is a mock implementation detail.
-        //    // In a real scenario, you'd call the ipip_db's method.
-        //    // For the purpose of this task, we are defining the structure,
-        //    // the actual interaction with ipip_db would be:
-        //    // char buffer[1024];
-        //    // ipip_db->find(ip_addr.to_string().c_str(), buffer);
-        //    // std::string location_info(buffer);
-        //    // And then parse buffer to get the country code.
-        //    // For now, let's assume a direct function `ipip_db->query_country_code(ip_addr_str)`
-        //    // This is a placeholder for the actual interaction with ipip_datx
-        //    // The actual lookup will be like:
-        //    // char result[256];
-        //    // ipip_db->find(destination_host.c_str(), result);
-        //    // std::string country_name_from_db = result; // This will be "Country\tProvince\tCity"
-        //    // We need to extract the country from this string.
-        //    // For now, as a placeholder for the logic:
-        //    if (destination_host == "1.2.3.4" && country_code_ == "US") return true; // Example
-        //    if (destination_host == "5.6.7.8" && country_code_ == "CN") return true; // Example
-        //    // The above is a mock. A real implementation requires calling ipip_db.
-        //    // The problem description mentions `ipip_db->lookup(destination_ip)`
-        //    // So, let's assume ipip_db has a method `lookup` that returns country code.
-        //    // std::string actual_country = ipip_db->lookup(ip_addr.to_string());
-        //    // return actual_country == country_code_;
-        //    // Since we don't have the definition of ipip_datx, we cannot call its methods directly.
-        //    // The task states: "Uses ipip_db->lookup(destination_ip) to get the country"
-        //    // This implies that ipip_datx has such a method.
-        //    // For the header file, we can only declare this intention.
-        //    // The actual call would be `std::string actual_country = ipip_db->lookup(ip_addr.to_string());`
-        //    // and then `return actual_country == country_code_;`
-        //    // This part cannot be fully implemented without ipip.hpp definition.
-        //    // For now, returning false to indicate that the actual logic is pending.
-        //    // This will be implemented in a .cpp file where ipip.hpp is included.
-        //    // However, for the purpose of this subtask (creating the header),
-        //    // we should try to make it as complete as possible based on the description.
-        //    // Let's assume ipip_datx has a method: std::string lookup_country(const std::string& ip) const;
-        //
-        //    // This is a conceptual representation. The actual call depends on ipip_datx's interface.
-        //    // if (ipip_db && ipip_db->is_loaded()) { // Assuming some check for db validity
-        //    //    std::string actual_country = ipip_db->lookup_country(destination_host);
-        //    //    return actual_country == country_code_;
-        //    // }
+        boost::system::error_code ec;
+        auto ip_addr = boost::asio::ip::make_address(destination_host, ec);
+        if (ec) {
+            return false;
         }
-        // As per problem: Uses ipip_db->lookup(destination_ip) to get the country
-        // We'll assume ipip_datx has a method `std::string lookup(const std::string& ip_str) const;`
-        // This is a placeholder for the actual call.
-        // The type of destination_ip for lookup might be boost::asio::ip::address
-        // For now, let's assume destination_host is already an IP string.
-        // The actual implementation of this method will require the definition of ipip_datx.
-        // This is a declaration of intent.
-        // In the .cpp file, we would include proxy/ipip.hpp and use the actual ipip_datx methods.
-        // For the header, we rely on the forward declaration of ipip_datx.
-        // The problem implies ipip_db->lookup exists and returns something comparable to country_code_.
-        // If ipip_db->lookup returns country name, and country_code_ is "US", "CN", mapping might be needed.
-        // Assuming lookup returns the country code directly for now.
-        // std::string actual_country = ipip_db->lookup(destination_host); // Placeholder
-        // return actual_country == country_code_; // Placeholder
-        return false; // Placeholder until ipip_datx is fully available/integrated
+
+        auto [regions, isp] = ipip_db->lookup(ip_addr);
+        if (regions.empty()) {
+            return false;
+        }
+        std::string country_name = regions.front();
+
+        // If the database already returns a two letter code, compare directly.
+        std::string upper_name = strutil::to_upper(country_name);
+        if (upper_name.size() == 2 && std::isalpha(static_cast<unsigned char>(upper_name[0])) && std::isalpha(static_cast<unsigned char>(upper_name[1]))) {
+            return upper_name == country_code_;
+        }
+
+        static const std::unordered_map<std::string, std::string> country_map = {
+            {"中国", "CN"},
+            {"中华人民共和国", "CN"},
+            {"中国台湾", "TW"},
+            {"台湾", "TW"},
+            {"中国香港", "HK"},
+            {"香港", "HK"},
+            {"中国澳门", "MO"},
+            {"澳门", "MO"},
+            {"美国", "US"},
+            {"United States", "US"},
+            {"日本", "JP"},
+            {"Japan", "JP"},
+            {"韩国", "KR"},
+            {"South Korea", "KR"},
+            {"英国", "GB"},
+            {"United Kingdom", "GB"},
+            {"俄罗斯", "RU"},
+            {"Russia", "RU"},
+            {"德国", "DE"},
+            {"Germany", "DE"},
+            {"法国", "FR"},
+            {"France", "FR"},
+            {"加拿大", "CA"},
+            {"Canada", "CA"},
+            {"澳大利亚", "AU"},
+            {"Australia", "AU"},
+            {"印度", "IN"},
+            {"India", "IN"},
+            {"巴西", "BR"},
+            {"Brazil", "BR"}
+        };
+
+        auto it = country_map.find(country_name);
+        if (it != country_map.end()) {
+            return it->second == country_code_;
+        }
+
+        // Fallback: compare uppercased name with the desired code.
+        return upper_name == country_code_;
     }
 
     std::string get_proxy_url() const override {
