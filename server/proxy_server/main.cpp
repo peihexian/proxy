@@ -233,28 +233,22 @@ start_proxy_server(net::io_context& ioc, server_ptr& server)
 		std::string proxy_url_val; 
 
 		RuleAction action_enum_val;
-		if (boost::iequals(action_str, "direct")) {
-			action_enum_val = RuleAction::DIRECT;
-		} else if (boost::iequals(action_str, "proxy")) {
-			action_enum_val = RuleAction::PROXY;
-			if (parts.size() < 4) {
-				XLOG_ERR << "Invalid rule string format for PROXY action (missing proxy_url): '" << rule_str << "'";
-				std::cerr << "Invalid rule string format for PROXY action (missing proxy_url): '" << rule_str << "'" << std::endl;
-				continue;
-			}
-			// Reconstruct proxy_url because it might contain colons
-			// The proxy_url starts after "type:value:action:"
-			size_t proxy_url_start_pos = parts[0].length() + parts[1].length() + parts[2].length() + 3;
-			if (rule_str.length() > proxy_url_start_pos) {
-				proxy_url_val = rule_str.substr(proxy_url_start_pos);
-			} else {
-				XLOG_ERR << "Proxy URL appears empty or malformed in rule: '" << rule_str << "'";
-				std::cerr << "Proxy URL appears empty or malformed in rule: '" << rule_str << "'" << std::endl;
-				continue;
-			}
-		} else if (boost::iequals(action_str, "block")) {
-			action_enum_val = RuleAction::BLOCK;
-		} else {
+                if (boost::iequals(action_str, "direct")) {
+                        action_enum_val = RuleAction::DIRECT;
+                } else if (boost::iequals(action_str, "proxy")) {
+                        action_enum_val = RuleAction::PROXY;
+                        if (parts.size() >= 4) {
+                                // Reconstruct proxy_url because it might contain colons
+                                // The proxy_url starts after "type:value:action:"
+                                size_t proxy_url_start_pos = parts[0].length() + parts[1].length() + parts[2].length() + 3;
+                                if (rule_str.length() > proxy_url_start_pos) {
+                                        proxy_url_val = rule_str.substr(proxy_url_start_pos);
+                                }
+                                // If empty, fall back to global proxy_pass at runtime
+                        }
+                } else if (boost::iequals(action_str, "block")) {
+                        action_enum_val = RuleAction::BLOCK;
+                } else {
 			XLOG_ERR << "Invalid action in rule string: '" << action_str << "' in rule: '" << rule_str << "'";
 			std::cerr << "Invalid action in rule string: '" << action_str << "' in rule: '" << rule_str << "'" << std::endl;
 			continue;

@@ -42,16 +42,11 @@ std::shared_ptr<RoutingRule> parse_test_rule(const std::string& rule_str) {
         action_enum_val = RuleAction::DIRECT;
     } else if (boost::iequals(action_str, "proxy")) {
         action_enum_val = RuleAction::PROXY;
-        if (parts.size() < 4) {
-            std::cerr << "Test Parse Error: Invalid rule string format for PROXY action (missing proxy_url): '" << rule_str << "'" << std::endl;
-            return nullptr;
-        }
-        size_t proxy_url_start_pos = parts[0].length() + parts[1].length() + parts[2].length() + 3;
-        if (rule_str.length() > proxy_url_start_pos) {
-            proxy_url_val = rule_str.substr(proxy_url_start_pos);
-        } else {
-            std::cerr << "Test Parse Error: Proxy URL appears empty or malformed in rule: '" << rule_str << "'" << std::endl;
-            return nullptr;
+        if (parts.size() >= 4) {
+            size_t proxy_url_start_pos = parts[0].length() + parts[1].length() + parts[2].length() + 3;
+            if (rule_str.length() > proxy_url_start_pos) {
+                proxy_url_val = rule_str.substr(proxy_url_start_pos);
+            }
         }
     } else if (boost::iequals(action_str, "block")) {
         action_enum_val = RuleAction::BLOCK;
@@ -205,8 +200,10 @@ void test_invalid_rule_parsing() {
     // Wrong number of parts
     auto rule2 = parse_test_rule("cidr:192.168.1.0/24");
     assert(rule2 == nullptr);
-    auto rule3 = parse_test_rule("domain:example.com:proxy"); // Missing proxy_url for proxy action
-    assert(rule3 == nullptr);
+    auto rule3 = parse_test_rule("domain:example.com:proxy"); // Missing proxy_url should be allowed
+    assert(rule3 != nullptr);
+    assert(rule3->action_ == RuleAction::PROXY);
+    assert(rule3->get_proxy_url().empty());
 
     // Invalid action
     auto rule4 = parse_test_rule("cidr:192.168.1.0/24:allow");
