@@ -6,8 +6,8 @@
 #include <memory>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/network_v4.hpp>
-#include <boost/algorithm/string/predicate.hpp> // For iequals
-
+// #include <boost/algorithm/string/predicate.hpp> // For iequals - replaced by strutil
+#include "proxy/strutil.hpp" // For strutil::to_lower_copy
 #include "proxy/ipip.hpp" // Include for ipip_datx definition
 
 namespace proxy {
