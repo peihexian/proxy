@@ -148,11 +148,12 @@ Rules are processed in the order they are defined, and the first matching rule i
 
 **Configuration:**
 
-Rules are defined in the configuration file using the `routing_rules` option. Each rule is a string with the format: `type:value:action[:proxy_url]`
+Rules are defined in the configuration file using the `routing_rules` option. Each rule is a string with the format: `type:value:action[:proxy_url]`.
+When `action` is `proxy`, the optional `proxy_url` overrides the global `proxy_pass` setting. If omitted, the server uses the proxy defined by `proxy_pass`.
 
 For example:
 `routing_rules = cidr:192.168.1.0/24:direct`
-`routing_rules = domain:.google.com:proxy:socks5://myproxy.example.com:1080`
+`routing_rules = domain:.google.com:proxy`
 `routing_rules = country:CN:block`
 
 See the `doc/server.conf.example` file for more detailed examples and usage.

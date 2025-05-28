@@ -20,13 +20,14 @@ auth_users=jack:1111
 # type: cidr, domain, country
 # value: CIDR string, domain pattern (exact, .suffix, *.prefix), 2-letter country code
 # action: direct, proxy, block
-# proxy_url (required for 'proxy' action): e.g., socks5://user:pass@host:port, http://host:port
+# proxy_url (optional for 'proxy' action). If omitted, use global proxy_pass. Example: socks5://user:pass@host:port
 
 # routing_rules = cidr:192.168.0.0/16:direct
 # routing_rules = domain:.internal.example.com:direct
 # routing_rules = domain:ads.example.com:block
 # routing_rules = country:CN:direct
-# routing_rules = country:US:proxy:socks5://us-proxy.example.com:1080
+# routing_rules = country:US:proxy
+# routing_rules = domain:.google.com:proxy
 # routing_rules = domain:restricted.com:block
 # routing_rules = cidr:10.1.2.3/32:proxy:http://specific-proxy.example.com:8080
 

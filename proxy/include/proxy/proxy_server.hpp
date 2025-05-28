@@ -4983,15 +4983,19 @@ R"x*x*x(<html>
 
 			// XLOG_DBG << "Connection id: " << m_connection_id << ", Evaluating routing rules for " << destination_host << ":" << destination_port;
 
-			for (const auto& rule : rules) {
-				if (rule->matches(destination_host, destination_port, ipip_db)) {
-					// XLOG_DBG << "Connection id: " << m_connection_id << ", Matched rule. Action: " << static_cast<int>(rule->action_);
-					if (rule->action_ == RuleAction::PROXY) {
-						return std::make_pair(rule->action_, rule->get_proxy_url());
-					}
-					return std::make_pair(rule->action_, "");
-				}
-			}
+                        for (const auto& rule : rules) {
+                                if (rule->matches(destination_host, destination_port, ipip_db)) {
+                                        // XLOG_DBG << "Connection id: " << m_connection_id << ", Matched rule. Action: " << static_cast<int>(rule->action_);
+                                        if (rule->action_ == RuleAction::PROXY) {
+                                                std::string url = rule->get_proxy_url();
+                                                if (url.empty()) {
+                                                        url = m_option.proxy_pass_;
+                                                }
+                                                return std::make_pair(rule->action_, url);
+                                        }
+                                        return std::make_pair(rule->action_, "");
+                                }
+                        }
 			// XLOG_DBG << "Connection id: " << m_connection_id << ", No routing rule matched.";
 			return std::nullopt;
 		}
